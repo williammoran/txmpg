@@ -23,13 +23,25 @@ func MakeFinalizer(
 // Finalizer manages transactions on a PostgreSQL
 // server
 type Finalizer struct {
-	name string
-	TX   *sql.Tx
-	id   string
+	name            string
+	TX              *sql.Tx
+	id              string
+	deferredCommits []func() error
+}
+
+// Defer registers a function to execute a Finalize time
+func (m *Finalizer) Defer(exec func() error) {
+	m.deferredCommits = append(m.deferredCommits, exec)
 }
 
 // Finalize sets up a prepared transaction
 func (m *Finalizer) Finalize() error {
+	for _, commit := range m.deferredCommits {
+		err := commit()
+		if err != nil {
+			return err
+		}
+	}
 	m.id = uuid.New().String()
 	_, err := m.TX.Exec(fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
 	return err
