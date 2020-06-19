@@ -7,15 +7,16 @@ import (
 	"log"
 	"runtime"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/williammoran/txmanager"
 )
 
-// MakeFinalizer is a constructor for a Postgres
+// MakeFinalizer2P is a constructor for a Postgres
 // transaction driver
-func MakeFinalizer(
+func MakeFinalizer2P(
 	ctx context.Context, name string, cPool *sql.DB,
-) *Finalizer {
+) *Finalizer2P {
 	tx, err := cPool.BeginTx(ctx, nil)
 	if err != nil {
 		panic(err)
@@ -30,7 +31,7 @@ func MakeFinalizer(
 	if err != nil {
 		panic(err)
 	}
-	finalizer := Finalizer{
+	finalizer := Finalizer2P{
 		pool:         cPool,
 		name:         name,
 		TX:           tx,
@@ -40,9 +41,9 @@ func MakeFinalizer(
 	return &finalizer
 }
 
-// Finalizer manages transactions on a PostgreSQL
+// Finalizer2P manages transactions on a PostgreSQL
 // server
-type Finalizer struct {
+type Finalizer2P struct {
 	TraceFlag       bool
 	name            string
 	pool            *sql.DB
@@ -54,13 +55,13 @@ type Finalizer struct {
 }
 
 // Defer registers a function to execute at Finalize time
-func (m *Finalizer) Defer(exec func() error) {
+func (m *Finalizer2P) Defer(exec func() error) {
 	m.Trace("Defer()")
 	m.deferredCommits = append(m.deferredCommits, exec)
 }
 
-// Finalize executes any deferred commits
-func (m *Finalizer) Finalize() error {
+// Finalize sets up a prepared transaction
+func (m *Finalizer2P) Finalize() error {
 	for _, commit := range m.deferredCommits {
 		err := commit()
 		if err != nil {
@@ -70,31 +71,51 @@ func (m *Finalizer) Finalize() error {
 				))
 		}
 	}
+	var status string
+	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	m.Trace("transaction status at Finalize() '%s'", status)
+	if status != "in progress" {
+		m.panicf("Finalize() not in active transaction", nil)
+	}
+	m.id = uuid.New().String()
+	m.Trace("Create Finalizer2P ID")
+	_, err = m.TX.Exec(fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
+	if err != nil {
+		defer func() { m.id = "" }()
+		return m.finalizerError(
+			txmanager.WrapError(err, "Doing PREPARE"),
+		)
+	}
+	m.Trace("Transaction prepared")
 	return nil
 }
 
 // Commit finishes the transaction
-func (m *Finalizer) Commit() {
+func (m *Finalizer2P) Commit() {
 	var status string
 	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	if err != nil {
 		m.panicf("Commit() failed to get txid_status()", err)
 	}
 	m.Trace("transaction status at Commit() '%s'", status)
-	if status != "in progress" {
-		m.panicf("Commit on uncomittable TX", nil)
+	if status == "in progress" {
+		err = m.TX.Commit()
+		if err != nil {
+			m.Trace("Unexpected transaction error! '%s'", err.Error())
+			// m.panicf("Failed to commit", err)
+		}
 	}
-	err = m.TX.Commit()
+	_, err = m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
 	if err != nil {
 		pqerr := err.(*pq.Error)
-		fmt.Printf("COMMIT error %+#v", pqerr)
-		m.panicf("Failed to commit", err)
+		fmt.Printf("COMMIT PREPARED error %+#v", pqerr)
+		m.panicf("Failed to commit prepared", err)
 	}
 	m.Trace("Transaction committed")
 }
 
 // Abort rolls back the transaction
-func (m *Finalizer) Abort() {
+func (m *Finalizer2P) Abort() {
 	var status string
 	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	m.Trace("transaction status at Abort() '%s'", status)
@@ -104,9 +125,18 @@ func (m *Finalizer) Abort() {
 			m.panicf("Failed to roll back", err)
 		}
 	}
+	if m.id == "" {
+		m.Trace("Abort() on transaction that was never finalized")
+		return
+	}
+	_, err = m.pool.Exec(fmt.Sprintf("ROLLBACK PREPARED '%s'", m.id))
+	if err != nil {
+		m.panicf("Failed ROLLBACK PREPARED", err)
+	}
+	m.Trace("ROLLBACK PREPARED")
 }
 
-func (m *Finalizer) finalizerError(err error) *txmanager.Error {
+func (m *Finalizer2P) finalizerError(err error) *txmanager.Error {
 	return txmanager.WrapError(
 		err,
 		fmt.Sprintf(
@@ -116,7 +146,7 @@ func (m *Finalizer) finalizerError(err error) *txmanager.Error {
 	)
 }
 
-func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
+func (m *Finalizer2P) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
 	log.Printf("panicf called from %s:%d", f, l)
 	message := fmt.Sprintf(msg, args...)
@@ -131,7 +161,7 @@ func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
 
 // Trace logs a message with details about the IDs
 // associated with the finalizer
-func (m *Finalizer) Trace(format string, args ...interface{}) {
+func (m *Finalizer2P) Trace(format string, args ...interface{}) {
 	if !m.TraceFlag {
 		return
 	}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"flag"
 	"fmt"
 	"math/rand"
+	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -79,7 +82,7 @@ func randomTransactions(c0, c1 *sql.DB) {
 
 func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 	fmt.Printf(
-		"Start transfer $%d from %d to %d\n",
+		includeGID("Start transfer $%d from %d to %d\n"),
 		amount, a0, a1,
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -93,7 +96,7 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 	txm.Add("bank1", f1)
 	var avail int
 	err := f0.TX.QueryRowContext(ctx, "SELECT balance FROM account WHERE id = $1 FOR UPDATE", a0).Scan(&avail)
-	f0.Trace("Selected balance: %+v\n", err)
+	f0.Trace(includeGID("Selected balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -102,12 +105,12 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		panic(err)
 	}
 	if avail < amount {
-		fmt.Printf("Insufficient funds\n")
+		fmt.Printf(includeGID("Insufficient funds\n"))
 		txm.Abort("Insufficient funds")
 		return
 	}
 	_, err = f0.TX.ExecContext(ctx, "UPDATE account SET balance = balance - $1 WHERE id = $2", amount, a0)
-	f0.Trace("debited balance: %+v\n", err)
+	f0.Trace(includeGID("debited balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -116,7 +119,7 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		panic(err)
 	}
 	_, err = f1.TX.ExecContext(ctx, "UPDATE account SET balance = balance + $1 WHERE id = $2", amount, a1)
-	f1.Trace("Credited balance: %+v\n", err)
+	f1.Trace(includeGID("Credited balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -126,12 +129,25 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 	}
 	err = txm.Commit()
 	if err != nil {
-		fmt.Printf("Comitted: %s\n", err.Error())
+		fmt.Printf(includeGID("Comitted: %s\n"), err.Error())
 	} else {
-		fmt.Print("Comitted")
+		fmt.Print(includeGID("Comitted"))
 	}
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("Transferred $%d\n", amount)
+	fmt.Printf(includeGID("Transferred $%d\n"), amount)
+}
+
+func includeGID(msg string) string {
+	return fmt.Sprintf("GID %d %s", getGID(), msg)
+}
+
+func getGID() uint64 {
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
 }
