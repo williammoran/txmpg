@@ -13,7 +13,7 @@ import (
 )
 
 // MakeFinalizer2P is a constructor for a Postgres
-// transaction driver
+// transaction driver that uses 2-phase commit
 func MakeFinalizer2P(
 	ctx context.Context, name string, cPool *sql.DB,
 ) *Finalizer2P {
