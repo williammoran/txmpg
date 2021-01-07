@@ -31,6 +31,7 @@ func MakeFinalizer(
 		panic(err)
 	}
 	finalizer := Finalizer{
+		ctx:          ctx,
 		pool:         cPool,
 		name:         name,
 		TX:           tx,
@@ -43,6 +44,7 @@ func MakeFinalizer(
 // Finalizer manages transactions on a PostgreSQL
 // server
 type Finalizer struct {
+	ctx             context.Context
 	TraceFlag       bool
 	name            string
 	pool            *sql.DB
@@ -86,8 +88,6 @@ func (m *Finalizer) Commit() {
 	}
 	err = m.TX.Commit()
 	if err != nil {
-		pqerr := err.(*pq.Error)
-		fmt.Printf("COMMIT error %+#v", pqerr)
 		m.panicf("Failed to commit", err)
 	}
 	m.Trace("Transaction committed")
@@ -101,6 +101,13 @@ func (m *Finalizer) Abort() {
 	if status == "in progress" {
 		err = m.TX.Rollback()
 		if err != nil {
+			ctxErr := m.ctx.Err()
+			if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
+				// If the context was cancelled for any
+				// reason, the transaction is already
+				// rolledb back by the driver
+				return
+			}
 			m.panicf("Failed to roll back", err)
 		}
 	}
@@ -119,12 +126,22 @@ func (m *Finalizer) finalizerError(err error) *txmanager.Error {
 func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
 	log.Printf("panicf called from %s:%d", f, l)
+	pqerr, ok := err.(*pq.Error)
+	if ok {
+		m.Trace("pq.Error: %+v", pqerr)
+	} else {
+		m.Trace("%T: %+v", err, err)
+	}
 	message := fmt.Sprintf(msg, args...)
 	if err != nil {
 		message = fmt.Sprintf("%s Error: %s", message, err.Error())
 	}
+	ctxErr := m.ctx.Err()
+	if ctxErr != nil {
+		panic(ctxErr)
+	}
 	log.Panicf(
-		"TX: %s PGTXID: %d PGPID: %d message: %s",
+		"PANIC: TX: %s PGTXID: %d PGPID: %d message: %s",
 		m.id, m.serverTXID, m.serverConnID, message,
 	)
 }
@@ -137,7 +154,7 @@ func (m *Finalizer) Trace(format string, args ...interface{}) {
 	}
 	message := fmt.Sprintf(format, args...)
 	log.Printf(
-		"TX: %s PGTXID: %d PGPID: %d message: %s",
+		"trace: TX: %s PGTXID: %d PGPID: %d message: %s",
 		m.id, m.serverTXID, m.serverConnID, message,
 	)
 }

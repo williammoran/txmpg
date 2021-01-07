@@ -52,7 +52,11 @@ func main() {
 }
 
 func makeTable(c *sql.DB) {
-	_, err := c.Exec("CREATE TABLE account (id INT, balance NUMERIC)")
+	_, err := c.Exec("DROP TABLE IF EXISTS account")
+	if err != nil {
+		panic(err)
+	}
+	_, err = c.Exec("CREATE TABLE account (id INT, balance NUMERIC)")
 	if err != nil {
 		panic(err)
 	}
@@ -127,6 +131,15 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		}
 		panic(err)
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			if r == context.Canceled || r == context.DeadlineExceeded {
+				// TODO: signal that this didn't complete
+				return
+			}
+			panic(r)
+		}
+	}()
 	err = txm.Commit()
 	if err != nil {
 		fmt.Printf(includeGID("Comitted: %s\n"), err.Error())
@@ -134,6 +147,10 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		fmt.Print(includeGID("Comitted"))
 	}
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			txm.Abort("Context timeout (likely deadlock)")
+			return
+		}
 		panic(err)
 	}
 	fmt.Printf(includeGID("Transferred $%d\n"), amount)
