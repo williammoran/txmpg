@@ -32,6 +32,7 @@ func MakeFinalizer2P(
 		panic(err)
 	}
 	finalizer := Finalizer2P{
+		ctx:          ctx,
 		pool:         cPool,
 		name:         name,
 		TX:           tx,
@@ -44,6 +45,7 @@ func MakeFinalizer2P(
 // Finalizer2P manages transactions on a PostgreSQL
 // server
 type Finalizer2P struct {
+	ctx             context.Context
 	TraceFlag       bool
 	name            string
 	pool            *sql.DB
@@ -52,6 +54,11 @@ type Finalizer2P struct {
 	serverConnID    int64
 	id              string
 	deferredCommits []func() error
+}
+
+// PgTx returns the underlying SQL transaction object
+func (m *Finalizer2P) PgTx() *sql.Tx {
+	return m.TX
 }
 
 // Defer registers a function to execute at Finalize time
@@ -75,6 +82,10 @@ func (m *Finalizer2P) Finalize() error {
 	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	m.Trace("transaction status at Finalize() '%s'", status)
 	if status != "in progress" {
+		ctxErr := m.ctx.Err()
+		if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
+			return ctxErr
+		}
 		m.panicf("Finalize() not in active transaction", nil)
 	}
 	m.id = uuid.New().String()
@@ -93,22 +104,32 @@ func (m *Finalizer2P) Finalize() error {
 // Commit finishes the transaction
 func (m *Finalizer2P) Commit() {
 	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	err := m.pool.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	if err != nil {
 		m.panicf("Commit() failed to get txid_status()", err)
 	}
 	m.Trace("transaction status at Commit() '%s'", status)
-	if status == "in progress" {
-		err = m.TX.Commit()
-		if err != nil {
-			m.Trace("Unexpected transaction error! '%s'", err.Error())
-			// m.panicf("Failed to commit", err)
+	if status != "in progress" {
+		m.panicf(fmt.Sprintf("Unexpected tx status '%s'", status), nil)
+	}
+	err = m.TX.Commit()
+	if err != nil {
+		ctxErr := m.ctx.Err()
+		if ctxErr != nil {
+			m.panicf("Commit context error", ctxErr)
 		}
+		m.panicf("Unexpected transaction error", err)
 	}
 	_, err = m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
 	if err != nil {
-		pqerr := err.(*pq.Error)
-		fmt.Printf("COMMIT PREPARED error %+#v", pqerr)
+		pqerr, casted := err.(*pq.Error)
+		if casted {
+			m.Trace("COMMIT PREPARED error %+#v", pqerr)
+		}
+		ctxErr := m.ctx.Err()
+		if ctxErr != nil {
+			m.panicf("COMMIT PREPARED context error", ctxErr)
+		}
 		m.panicf("Failed to commit prepared", err)
 	}
 	m.Trace("Transaction committed")
@@ -122,7 +143,13 @@ func (m *Finalizer2P) Abort() {
 	if status == "in progress" {
 		err = m.TX.Rollback()
 		if err != nil {
-			m.panicf("Failed to roll back", err)
+			ctxErr := m.ctx.Err()
+			// If the context was cancelled for any
+			// reason, the transaction is already
+			// rolled back by the driver
+			if ctxErr != context.DeadlineExceeded && ctxErr != context.Canceled {
+				m.panicf("Failed to roll back", err)
+			}
 		}
 	}
 	if m.id == "" {

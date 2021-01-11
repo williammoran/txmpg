@@ -19,6 +19,10 @@ import (
 
 // This example simulates bank transfers between two
 // independent databases
+// Note that it is specifically designed to encounter a
+// lot of conflicts and deadlocks to stress test the
+// finalizers, so there are more aborts than are likely
+// to be encountered in a real world scenario.
 
 /*
 SELECT datname, wait_event_type, wait_event, state, query FROM pg_stat_activity;
@@ -27,6 +31,7 @@ SELECT datname, wait_event_type, wait_event, state, query FROM pg_stat_activity;
 func main() {
 	cs0 := flag.String("0", "", "first database connection")
 	cs1 := flag.String("1", "", "second database connection")
+	manager := flag.Int("v", 1, "Use either single or 2 phase transactions")
 	flag.Parse()
 	c0, err := sql.Open("postgres", *cs0)
 	if err != nil {
@@ -45,7 +50,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			randomTransactions(c0, c1)
+			randomTransactions(*manager, c0, c1)
 		}()
 	}
 	wg.Wait()
@@ -71,35 +76,41 @@ func addAccounts(c *sql.DB) {
 	}
 }
 
-func randomTransactions(c0, c1 *sql.DB) {
+func randomTransactions(manager int, c0, c1 *sql.DB) {
 	for i := 0; i < 100; i++ {
 		a0 := rand.Intn(5) + 1
 		a1 := rand.Intn(5) + 1
 		amount := rand.Intn(500) + 1
-		transfer(c0, a0, c1, a1, amount)
+		transfer(manager, c0, a0, c1, a1, amount)
 		a0 = rand.Intn(5) + 1
 		a1 = rand.Intn(5) + 1
 		amount = rand.Intn(500) + 1
-		transfer(c1, a0, c0, a1, amount)
+		transfer(manager, c1, a0, c0, a1, amount)
 	}
 }
 
-func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
+func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 	fmt.Printf(
 		includeGID("Start transfer $%d from %d to %d\n"),
 		amount, a0, a1,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	txm := txmanager.Transaction{}
-	f0 := txmpg.MakeFinalizer(ctx, "bank0", c0)
-	f0.TraceFlag = true
-	f1 := txmpg.MakeFinalizer(ctx, "bank1", c1)
-	f1.TraceFlag = true
+	var f0, f1 txmpg.TxFinalizer
+	if manager == 1 {
+		f0 = txmpg.MakeFinalizer(ctx, "bank0", c0)
+		f0.(*txmpg.Finalizer).TraceFlag = true
+		f1 = txmpg.MakeFinalizer(ctx, "bank1", c1)
+		f1.(*txmpg.Finalizer).TraceFlag = true
+	} else {
+		f0 = txmpg.MakeFinalizer2P(ctx, "bank0", c0)
+		f1 = txmpg.MakeFinalizer2P(ctx, "bank1", c1)
+	}
 	txm.Add("bank0", f0)
 	txm.Add("bank1", f1)
 	var avail int
-	err := f0.TX.QueryRowContext(ctx, "SELECT balance FROM account WHERE id = $1 FOR UPDATE", a0).Scan(&avail)
+	err := f0.PgTx().QueryRowContext(ctx, "SELECT balance FROM account WHERE id = $1 FOR UPDATE", a0).Scan(&avail)
 	f0.Trace(includeGID("Selected balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -113,7 +124,7 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		txm.Abort("Insufficient funds")
 		return
 	}
-	_, err = f0.TX.ExecContext(ctx, "UPDATE account SET balance = balance - $1 WHERE id = $2", amount, a0)
+	_, err = f0.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance - $1 WHERE id = $2", amount, a0)
 	f0.Trace(includeGID("debited balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -122,7 +133,7 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		}
 		panic(err)
 	}
-	_, err = f1.TX.ExecContext(ctx, "UPDATE account SET balance = balance + $1 WHERE id = $2", amount, a1)
+	_, err = f1.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance + $1 WHERE id = $2", amount, a1)
 	f1.Trace(includeGID("Credited balance: %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -142,16 +153,13 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 	}()
 	err = txm.Commit()
 	if err != nil {
-		fmt.Printf(includeGID("Comitted: %s\n"), err.Error())
-	} else {
-		fmt.Print(includeGID("Comitted"))
-	}
-	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
 			return
 		}
 		panic(err)
+	} else {
+		fmt.Print(includeGID("Comitted"))
 	}
 	fmt.Printf(includeGID("Transferred $%d\n"), amount)
 }

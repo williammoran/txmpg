@@ -55,6 +55,11 @@ type Finalizer struct {
 	deferredCommits []func() error
 }
 
+// PgTx returns the underlying SQL transaction object
+func (m *Finalizer) PgTx() *sql.Tx {
+	return m.TX
+}
+
 // Defer registers a function to execute at Finalize time
 func (m *Finalizer) Defer(exec func() error) {
 	m.Trace("Defer()")
@@ -105,7 +110,7 @@ func (m *Finalizer) Abort() {
 			if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
 				// If the context was cancelled for any
 				// reason, the transaction is already
-				// rolledb back by the driver
+				// rolled back by the driver
 				return
 			}
 			m.panicf("Failed to roll back", err)
