@@ -2,5 +2,5 @@ github.com/google/uuid v1.1.1 h1:Gkbcsh/GbpXz7lPftLA3P6TYMwjCLYm83jiFQZF/3gY=
 github.com/google/uuid v1.1.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/lib/pq v1.7.0 h1:h93mCPfUSkaul3Ka/VG8uZdmW1uMHDGxzu0NWHuJmHY=
 github.com/lib/pq v1.7.0/go.mod h1:AlVN5x4E4T544tWzH6hKfbfQvm3HdbOxrmggDNAPY9o=
-github.com/williammoran/txmanager v0.0.5 h1:cZjkUgUzNZgjohB5zAAY0SFRf4VeYuJrzF0l+f+Sroo=
-github.com/williammoran/txmanager v0.0.5/go.mod h1:f6djAnkKzY6pCPP9+RLIat6MoEB3vnxm04hQ6pWZR0E=
+github.com/williammoran/txmanager v1.0.1 h1:DNMlxtNuQJ7Dhls0uklOTdyfm3S6cSbn/2jojPQG5Mg=
+github.com/williammoran/txmanager v1.0.1/go.mod h1:f6djAnkKzY6pCPP9+RLIat6MoEB3vnxm04hQ6pWZR0E=

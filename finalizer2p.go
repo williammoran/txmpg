@@ -102,37 +102,40 @@ func (m *Finalizer2P) Finalize() error {
 }
 
 // Commit finishes the transaction
-func (m *Finalizer2P) Commit() {
+func (m *Finalizer2P) Commit() error {
 	var status string
-	err := m.pool.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	if err != nil {
-		m.panicf("Commit() failed to get txid_status()", err)
+		return txmanager.WrapError(err, "Commit() failed to get txid_status()")
 	}
 	m.Trace("transaction status at Commit() '%s'", status)
 	if status != "in progress" {
-		m.panicf(fmt.Sprintf("Unexpected tx status '%s'", status), nil)
+		return fmt.Errorf("Unexpected tx status '%s'", status)
 	}
 	err = m.TX.Commit()
 	if err != nil {
+		m.Trace("Commit error: %s", err.Error())
 		ctxErr := m.ctx.Err()
 		if ctxErr != nil {
-			m.panicf("Commit context error", ctxErr)
+			return ctxErr
 		}
-		m.panicf("Unexpected transaction error", err)
+		return txmanager.WrapError(err, "Unexpected transaction error")
 	}
 	_, err = m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
 	if err != nil {
+		m.Trace("COMMIT PREPARED error: %s", err.Error())
 		pqerr, casted := err.(*pq.Error)
 		if casted {
 			m.Trace("COMMIT PREPARED error %+#v", pqerr)
 		}
 		ctxErr := m.ctx.Err()
 		if ctxErr != nil {
-			m.panicf("COMMIT PREPARED context error", ctxErr)
+			return ctxErr
 		}
-		m.panicf("Failed to commit prepared", err)
+		return txmanager.WrapError(err, "Failed to commit prepared")
 	}
 	m.Trace("Transaction committed")
+	return nil
 }
 
 // Abort rolls back the transaction
@@ -147,7 +150,7 @@ func (m *Finalizer2P) Abort() {
 			// If the context was cancelled for any
 			// reason, the transaction is already
 			// rolled back by the driver
-			if ctxErr != context.DeadlineExceeded && ctxErr != context.Canceled {
+			if ctxErr != nil {
 				m.panicf("Failed to roll back", err)
 			}
 		}

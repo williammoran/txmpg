@@ -32,6 +32,8 @@ func main() {
 	cs0 := flag.String("0", "", "first database connection")
 	cs1 := flag.String("1", "", "second database connection")
 	manager := flag.Int("v", 1, "Use either single or 2 phase transactions")
+	routines := flag.Int("c", 5, "Number of concurrent routines")
+	transactions := flag.Int("t", 100, "Number of transactions per goroutine")
 	flag.Parse()
 	c0, err := sql.Open("postgres", *cs0)
 	if err != nil {
@@ -46,11 +48,11 @@ func main() {
 	addAccounts(c0)
 	addAccounts(c1)
 	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
+	for i := 0; i < *routines; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			randomTransactions(*manager, c0, c1)
+			randomTransactions(*transactions, *manager, c0, c1)
 		}()
 	}
 	wg.Wait()
@@ -76,8 +78,9 @@ func addAccounts(c *sql.DB) {
 	}
 }
 
-func randomTransactions(manager int, c0, c1 *sql.DB) {
-	for i := 0; i < 100; i++ {
+func randomTransactions(num, manager int, c0, c1 *sql.DB) {
+	fmt.Println(includeGID("Starting transaction thread"))
+	for i := 0; i < num/2; i++ {
 		a0 := rand.Intn(5) + 1
 		a1 := rand.Intn(5) + 1
 		amount := rand.Intn(500) + 1
@@ -105,13 +108,15 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		f1.(*txmpg.Finalizer).TraceFlag = true
 	} else {
 		f0 = txmpg.MakeFinalizer2P(ctx, "bank0", c0)
+		f0.(*txmpg.Finalizer2P).TraceFlag = true
 		f1 = txmpg.MakeFinalizer2P(ctx, "bank1", c1)
+		f1.(*txmpg.Finalizer2P).TraceFlag = true
 	}
 	txm.Add("bank0", f0)
 	txm.Add("bank1", f1)
 	var avail int
 	err := f0.PgTx().QueryRowContext(ctx, "SELECT balance FROM account WHERE id = $1 FOR UPDATE", a0).Scan(&avail)
-	f0.Trace(includeGID("Selected balance: %+v\n"), err)
+	f0.Trace(includeGID("Selected balance = %d err = %+v\n"), avail, err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -120,12 +125,12 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		panic(err)
 	}
 	if avail < amount {
-		fmt.Printf(includeGID("Insufficient funds\n"))
+		fmt.Println(includeGID("Insufficient funds"))
 		txm.Abort("Insufficient funds")
 		return
 	}
 	_, err = f0.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance - $1 WHERE id = $2", amount, a0)
-	f0.Trace(includeGID("debited balance: %+v\n"), err)
+	f0.Trace(includeGID("debited balance, err = %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -134,7 +139,7 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		panic(err)
 	}
 	_, err = f1.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance + $1 WHERE id = $2", amount, a1)
-	f1.Trace(includeGID("Credited balance: %+v\n"), err)
+	f1.Trace(includeGID("Credited balance, err = %+v\n"), err)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			txm.Abort("Context timeout (likely deadlock)")
@@ -159,7 +164,7 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
 		}
 		panic(err)
 	} else {
-		fmt.Print(includeGID("Comitted"))
+		fmt.Println(includeGID("Comitted"))
 	}
 	fmt.Printf(includeGID("Transferred $%d\n"), amount)
 }

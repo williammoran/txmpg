@@ -32,7 +32,6 @@ func MakeFinalizer(
 	}
 	finalizer := Finalizer{
 		ctx:          ctx,
-		pool:         cPool,
 		name:         name,
 		TX:           tx,
 		serverTXID:   id,
@@ -47,7 +46,6 @@ type Finalizer struct {
 	ctx             context.Context
 	TraceFlag       bool
 	name            string
-	pool            *sql.DB
 	TX              *sql.Tx
 	serverTXID      int64
 	serverConnID    int64
@@ -81,21 +79,22 @@ func (m *Finalizer) Finalize() error {
 }
 
 // Commit finishes the transaction
-func (m *Finalizer) Commit() {
+func (m *Finalizer) Commit() error {
 	var status string
 	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	if err != nil {
-		m.panicf("Commit() failed to get txid_status()", err)
+		return txmanager.WrapError(err, "Commit() failed to get txid_status()")
 	}
 	m.Trace("transaction status at Commit() '%s'", status)
 	if status != "in progress" {
-		m.panicf("Commit on uncomittable TX", nil)
+		return fmt.Errorf("Commit on TX in status '%s'", status)
 	}
 	err = m.TX.Commit()
 	if err != nil {
-		m.panicf("Failed to commit", err)
+		return txmanager.WrapError(err, "Failed to commit")
 	}
 	m.Trace("Transaction committed")
+	return nil
 }
 
 // Abort rolls back the transaction
