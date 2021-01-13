@@ -11,9 +11,9 @@ import (
 	"github.com/williammoran/txmanager"
 )
 
-// MakeFinalizer is a constructor for a Postgres
+// NewFinalizer is a constructor for a Postgres
 // transaction driver
-func MakeFinalizer(
+func NewFinalizer(
 	ctx context.Context, name string, cPool *sql.DB,
 ) *Finalizer {
 	tx, err := cPool.BeginTx(ctx, nil)

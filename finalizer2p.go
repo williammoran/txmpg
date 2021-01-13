@@ -14,7 +14,7 @@ import (
 	"github.com/williammoran/txmanager"
 )
 
-// MakeFinalizer2P is a constructor for a Postgres
+// NewFinalizer2P is a constructor for a Postgres
 // transaction driver that uses 2-phase commit.
 // This finalizer provides the highest level of safety
 // from lost data.
@@ -22,7 +22,7 @@ import (
 // management requirements of prepared transactions
 // and 2-phase commit or you will have difficulty
 // recovering when something goes wrong.
-func MakeFinalizer2P(
+func NewFinalizer2P(
 	ctx context.Context, name string, cPool *sql.DB,
 ) *Finalizer2P {
 	tx, err := cPool.BeginTx(ctx, nil)
