@@ -24,8 +24,8 @@ func transfer(c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int) {
     // It's always a good idea to defer an Abort(), if
     // the transaction was commited, Abort() is a NOOP
     defer txm.Abort("Defer")
-    f0 := txmpg.MakeFinalizer2P(ctx, "bank0", c0)
-    f1 := txmpg.MakeFinalizer2P(ctx, "bank1", c1)
+    f0 := txmpg.MakeFinalizer(ctx, "bank0", c0)
+    f1 := txmpg.MakeFinalizer(ctx, "bank1", c1)
     txm.Add("bank0", f0)
     txm.Add("bank1", f1)
     var avail int
