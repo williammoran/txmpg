@@ -1,4 +1,4 @@
-module github.com/williammoran/txmpg
+module github.com/williammoran/txmpg/v2
 
 go 1.14
 
