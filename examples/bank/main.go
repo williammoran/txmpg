@@ -27,9 +27,17 @@ import (
 // finalizers, so there are more aborts than are likely
 // to be encountered in a real world scenario.
 
-/*
-SELECT datname, wait_event_type, wait_event, state, query FROM pg_stat_activity;
-*/
+// Some example command lines:
+// All assume that databases called "bank0" and "bank1"
+// already exist on a PostgreSQL server running locally:
+// * Run the standard finalizer with 5 concurrent connections
+//   executing 100 transfers each (the defaults)
+// ./bank -0 "user=postgres dbname=bank0" -1 "user=postgres dbname=bank1"
+// * Run the 2-phase finalizer with 3 concurrent connections
+//   executing 200 transfers each
+// ./bank -0 "user=postgres dbname=bank0" -1 "user=postgres dbname=bank1" -v 2 -c 3 -t 200
+// * Run the 2-phase finalizer with verbose output
+// ./bank -0 "user=postgres dbname=bank0" -1 "user=postgres dbname=bank1" -v 2 -d
 
 func main() {
 	cs0 := flag.String("0", "", "first database connection")
@@ -47,6 +55,9 @@ func main() {
 	makeTable(c1)
 	addAccounts(c0)
 	addAccounts(c1)
+	// CTRL+\ from the terminal while this is running will
+	// produce a full stack trace, which can be interesting
+	// when the code stalls due to deadlocks.
 	go func() {
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGQUIT)
@@ -68,6 +79,8 @@ func main() {
 	wg.Wait()
 }
 
+// connect just connects using the passed conntection
+// string or panic()
 func connect(cs string) *sql.DB {
 	conn, err := sql.Open("postgres", cs)
 	if err != nil {
@@ -76,6 +89,8 @@ func connect(cs string) *sql.DB {
 	return conn
 }
 
+// makeTable drops any table called "accounts" then
+// creates it with a simple account ID/balance structure
 func makeTable(c *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -89,6 +104,7 @@ func makeTable(c *sql.DB) {
 	}
 }
 
+// addAccounts adds 5 accounts with $1000 each
 func addAccounts(c *sql.DB) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -100,6 +116,10 @@ func addAccounts(c *sql.DB) {
 	}
 }
 
+// randomeTransaction executes the number of transactions
+// specified by num using on the databases specified by
+// c0 and c1. 1/2 the transactions transfer from c0 -> c1
+// and half from c1 -> c0
 func randomTransactions(num, manager int, c0, c1 *sql.DB, debug bool) {
 	fmt.Println(includeGID("Starting transaction thread"))
 	for i := 0; i < num/2; i++ {
@@ -114,6 +134,8 @@ func randomTransactions(num, manager int, c0, c1 *sql.DB, debug bool) {
 	}
 }
 
+// transfer does a single transfer of funds between the
+// specified accounts
 func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int, debug bool) {
 	fmt.Printf(
 		includeGID("Start transfer $%d from %d to %d\n"),
@@ -122,6 +144,8 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int, d
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	txm := txmanager.Transaction{}
+	// It's always a good idea to defer an Abort(), if
+	// the transaction was commited, Abort() is a NOOP
 	defer txm.Abort("Defer")
 	var f0, f1 txmpg.TxFinalizer
 	if manager == 1 {
@@ -164,10 +188,16 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int, d
 	}
 }
 
+// includeGID adds the goroutine ID to the beginning of
+// a string. Since this example is specifically for
+// concurrency, it can be helpful to track which thread
+// is doing which operations
 func includeGID(msg string) string {
 	return fmt.Sprintf("GID %d %s", getGID(), msg)
 }
 
+// getGID just returns the goroutine ID, which is
+// a surprisingly complex operation
 func getGID() uint64 {
 	b := make([]byte, 64)
 	b = b[:runtime.Stack(b, false)]
