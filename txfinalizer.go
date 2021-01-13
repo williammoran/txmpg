@@ -3,7 +3,7 @@ package txmpg
 import (
 	"database/sql"
 
-	"github.com/williammoran/txmanager"
+	"github.com/williammoran/txmanager/v2"
 )
 
 // TxFinalizer is an abstraction that allows the single

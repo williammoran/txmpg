@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/williammoran/txmanager"
+	"github.com/williammoran/txmanager/v2"
 	"github.com/williammoran/txmpg"
 )
 

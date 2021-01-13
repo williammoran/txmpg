@@ -3,7 +3,7 @@ module github.com/williammoran/txmpg
 go 1.14
 
 require (
-	github.com/google/uuid v1.1.1
-	github.com/lib/pq v1.7.0
-	github.com/williammoran/txmanager v1.0.1
+	github.com/google/uuid v1.1.4
+	github.com/lib/pq v1.9.0
+	github.com/williammoran/txmanager/v2 v2.0.1
 )

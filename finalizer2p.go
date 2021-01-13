@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
-	"github.com/williammoran/txmanager"
+	"github.com/williammoran/txmanager/v2"
 )
 
 // NewFinalizer2P is a constructor for a Postgres
