@@ -3,9 +3,11 @@ package txmpg
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -78,19 +80,9 @@ func (m *Finalizer2P) Finalize() error {
 				))
 		}
 	}
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	m.Trace("transaction status at Finalize() '%s'", status)
-	if status != "in progress" {
-		ctxErr := m.ctx.Err()
-		if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
-			return ctxErr
-		}
-		m.panicf("Finalize() not in active transaction", nil)
-	}
 	m.id = uuid.New().String()
 	m.Trace("Create Finalizer2P ID")
-	_, err = m.TX.Exec(fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
+	_, err := m.TX.Exec(fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
 	if err != nil {
 		defer func() { m.id = "" }()
 		return m.finalizerError(
@@ -98,30 +90,16 @@ func (m *Finalizer2P) Finalize() error {
 		)
 	}
 	m.Trace("Transaction prepared")
+	m.TX = nil
 	return nil
 }
 
 // Commit finishes the transaction
 func (m *Finalizer2P) Commit() error {
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	if err != nil {
-		return txmanager.WrapError(err, "Commit() failed to get txid_status()")
+	if m.TX != nil {
+		return errors.New("Commit on non-finalized transaction")
 	}
-	m.Trace("transaction status at Commit() '%s'", status)
-	if status != "in progress" {
-		return fmt.Errorf("Unexpected tx status '%s'", status)
-	}
-	err = m.TX.Commit()
-	if err != nil {
-		m.Trace("Commit error: %s", err.Error())
-		ctxErr := m.ctx.Err()
-		if ctxErr != nil {
-			return ctxErr
-		}
-		return txmanager.WrapError(err, "Unexpected transaction error")
-	}
-	_, err = m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
+	_, err := m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
 	if err != nil {
 		m.Trace("COMMIT PREPARED error: %s", err.Error())
 		pqerr, casted := err.(*pq.Error)
@@ -140,26 +118,24 @@ func (m *Finalizer2P) Commit() error {
 
 // Abort rolls back the transaction
 func (m *Finalizer2P) Abort() {
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	m.Trace("transaction status at Abort() '%s'", status)
-	if status == "in progress" {
-		err = m.TX.Rollback()
+	if m.TX != nil {
+		m.Trace("Abort() doing TX.Rollback()")
+		err := m.TX.Rollback()
 		if err != nil {
-			ctxErr := m.ctx.Err()
-			// If the context was cancelled for any
-			// reason, the transaction is already
-			// rolled back by the driver
-			if ctxErr != nil {
-				m.panicf("Failed to roll back", err)
+			if err != sql.ErrTxDone {
+				m.panicf("Failed Rollback()", err)
 			}
+			m.Trace("Abort() on failed transaction")
 		}
+		return
 	}
 	if m.id == "" {
 		m.Trace("Abort() on transaction that was never finalized")
 		return
 	}
-	_, err = m.pool.Exec(fmt.Sprintf("ROLLBACK PREPARED '%s'", m.id))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := m.pool.ExecContext(ctx, fmt.Sprintf("ROLLBACK PREPARED '%s'", m.id))
 	if err != nil {
 		m.panicf("Failed ROLLBACK PREPARED", err)
 	}
