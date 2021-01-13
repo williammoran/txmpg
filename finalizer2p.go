@@ -15,7 +15,13 @@ import (
 )
 
 // MakeFinalizer2P is a constructor for a Postgres
-// transaction driver that uses 2-phase commit
+// transaction driver that uses 2-phase commit.
+// This finalizer provides the highest level of safety
+// from lost data.
+// DO NOT USE this finalizer unless you understand the
+// management requirements of prepared transactions
+// and 2-phase commit or you will have difficulty
+// recovering when something goes wrong.
 func MakeFinalizer2P(
 	ctx context.Context, name string, cPool *sql.DB,
 ) *Finalizer2P {
@@ -45,7 +51,9 @@ func MakeFinalizer2P(
 }
 
 // Finalizer2P manages transactions on a PostgreSQL
-// server
+// server using prepared transactions. Ensure that you
+// understand how to set up and manage your server for
+// prepared transactions before using this finalizer
 type Finalizer2P struct {
 	ctx             context.Context
 	TraceFlag       bool
@@ -69,7 +77,15 @@ func (m *Finalizer2P) Defer(exec func() error) {
 	m.deferredCommits = append(m.deferredCommits, exec)
 }
 
-// Finalize sets up a prepared transaction
+// Finalize sets up a prepared transaction. If Finalize
+// returns without error, then all data changes have been
+// written to disk on the PostgreSQL server and will not
+// be lost in the event of a crash of the server. However,
+// if Commit() is not called, the changes will not be
+// visible until the prepared transaction is commited
+// manually. This finalizer does not check for orphaned
+// prepared transactions, so be aware that extra DB
+// administration may be necessary.
 func (m *Finalizer2P) Finalize() error {
 	for _, commit := range m.deferredCommits {
 		err := commit()
@@ -94,7 +110,8 @@ func (m *Finalizer2P) Finalize() error {
 	return nil
 }
 
-// Commit finishes the transaction
+// Commit finishes the transaction by committing the
+// prepared transaction
 func (m *Finalizer2P) Commit() error {
 	if m.TX != nil {
 		return errors.New("Commit on non-finalized transaction")
@@ -117,6 +134,9 @@ func (m *Finalizer2P) Commit() error {
 }
 
 // Abort rolls back the transaction
+// Abort is a NOOP if the transaction is already committed
+// so it's good practice to defer it to ensure transactions
+// are never left hanging
 func (m *Finalizer2P) Abort() {
 	if m.TX != nil {
 		m.Trace("Abort() doing TX.Rollback()")
@@ -142,6 +162,8 @@ func (m *Finalizer2P) Abort() {
 	m.Trace("ROLLBACK PREPARED")
 }
 
+// finalizerError is a helper to include detailed
+// information in errors
 func (m *Finalizer2P) finalizerError(err error) *txmanager.Error {
 	return txmanager.WrapError(
 		err,
@@ -152,6 +174,9 @@ func (m *Finalizer2P) finalizerError(err error) *txmanager.Error {
 	)
 }
 
+// panicf includes detailed information in the rare event
+// that this finalizer encounters an error condition that
+// it can't manage.
 func (m *Finalizer2P) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
 	log.Printf("panicf called from %s:%d", f, l)

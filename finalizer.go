@@ -40,8 +40,7 @@ func MakeFinalizer(
 	return &finalizer
 }
 
-// Finalizer manages transactions on a PostgreSQL
-// server
+// Finalizer manages transactions on a PostgreSQL server
 type Finalizer struct {
 	ctx             context.Context
 	TraceFlag       bool
@@ -98,6 +97,8 @@ func (m *Finalizer) Commit() error {
 }
 
 // Abort rolls back the transaction
+// Abort is a NOOP if the transaction is already comitted,
+// so it's good practice to defer it
 func (m *Finalizer) Abort() {
 	var status string
 	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
@@ -117,6 +118,8 @@ func (m *Finalizer) Abort() {
 	}
 }
 
+// finalizerError is a helper to include detailed
+// information in errors
 func (m *Finalizer) finalizerError(err error) *txmanager.Error {
 	return txmanager.WrapError(
 		err,
@@ -127,6 +130,9 @@ func (m *Finalizer) finalizerError(err error) *txmanager.Error {
 	)
 }
 
+// panicf includes detailed information in the rare event
+// that this finalizer encounters an error condition that
+// it can't manage.
 func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
 	log.Printf("panicf called from %s:%d", f, l)
