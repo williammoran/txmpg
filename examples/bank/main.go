@@ -126,22 +126,41 @@ func randomTransactions(num, manager int, c0, c1 *sql.DB, debug bool) {
 		a0 := rand.Intn(5) + 1
 		a1 := rand.Intn(5) + 1
 		amount := rand.Intn(500) + 1
-		transfer(manager, c0, a0, c1, a1, amount, debug)
+		retry := transfer(manager, c0, a0, c1, a1, amount, debug)
+		for retry {
+			time.Sleep(time.Duration(rand.Intn(3500)) * time.Millisecond)
+			fmt.Printf(includeGID("Retrying transfer of $%d from %d to %d\n"), amount, a0, a1)
+			retry = transfer(manager, c0, a0, c1, a1, amount, debug)
+		}
 		a0 = rand.Intn(5) + 1
 		a1 = rand.Intn(5) + 1
 		amount = rand.Intn(500) + 1
-		transfer(manager, c1, a0, c0, a1, amount, debug)
+		retry = transfer(manager, c1, a0, c0, a1, amount, debug)
+		for retry {
+			time.Sleep(time.Duration(rand.Intn(3500)) * time.Millisecond)
+			fmt.Printf(includeGID("Retrying transfer of $%d from %d to %d\n"), amount, a0, a1)
+			retry = transfer(manager, c1, a0, c0, a1, amount, debug)
+		}
 	}
 }
 
 // transfer does a single transfer of funds between the
 // specified accounts
-func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int, debug bool) {
+// Returns true if the transfer should be retried
+// (because of some sort of transient problem) or false
+// if the transfer is complete
+func transfer(
+	manager int,
+	c0 *sql.DB, a0 int,
+	c1 *sql.DB, a1 int,
+	amount int,
+	debug bool,
+) bool {
 	fmt.Printf(
 		includeGID("Start transfer $%d from %d to %d\n"),
 		amount, a0, a1,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	txm := txmanager.Transaction{}
 	// It's always a good idea to defer an Abort(), if
@@ -165,27 +184,28 @@ func transfer(manager int, c0 *sql.DB, a0 int, c1 *sql.DB, a1 int, amount int, d
 	err := f0.PgTx().QueryRowContext(ctx, "SELECT balance FROM account WHERE id = $1 FOR UPDATE", a0).Scan(&avail)
 	f0.Trace(includeGID("Selected balance = %d err = %+v\n"), avail, err)
 	if err != nil {
-		return
+		return true
 	}
 	if avail < amount {
 		fmt.Println(includeGID("Insufficient funds"))
 		txm.Abort("Insufficient funds")
-		return
+		return false
 	}
 	_, err = f0.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance - $1 WHERE id = $2", amount, a0)
 	f0.Trace(includeGID("debited balance, err = %+v\n"), err)
 	if err != nil {
-		return
+		return true
 	}
 	_, err = f1.PgTx().ExecContext(ctx, "UPDATE account SET balance = balance + $1 WHERE id = $2", amount, a1)
 	f1.Trace(includeGID("Credited balance, err = %+v\n"), err)
 	if err != nil {
-		return
+		return true
 	}
 	err = txm.Commit()
 	if err == nil {
 		fmt.Printf(includeGID("Commited transfer of $%d\n"), amount)
 	}
+	return false
 }
 
 // includeGID adds the goroutine ID to the beginning of
