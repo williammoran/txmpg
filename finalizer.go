@@ -2,37 +2,39 @@ package txmpg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"runtime"
+	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/williammoran/txmanager"
 )
 
 // MakeFinalizer is a constructor for a Postgres
 // transaction driver
 func MakeFinalizer(
-	ctx context.Context, name string, cPool *sql.DB,
+	ctx context.Context, name string, cPool *pgxpool.Pool,
 ) *Finalizer {
-	tx, err := cPool.BeginTx(ctx, nil)
+	tx, err := cPool.Begin(ctx)
 	if err != nil {
 		panic(err)
 	}
 	var id int64
-	err = tx.QueryRowContext(ctx, "SELECT txid_current()").Scan(&id)
+	err = tx.QueryRow(ctx, "SELECT txid_current()").Scan(&id)
 	if err != nil {
 		panic(err)
 	}
 	var pid int64
-	err = tx.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&pid)
+	err = tx.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
 	if err != nil {
 		panic(err)
 	}
 	finalizer := Finalizer{
 		ctx:          ctx,
 		name:         name,
+		pool:         cPool,
 		TX:           tx,
 		serverTXID:   id,
 		serverConnID: pid,
@@ -46,15 +48,17 @@ type Finalizer struct {
 	ctx             context.Context
 	TraceFlag       bool
 	name            string
-	TX              *sql.Tx
+	pool            *pgxpool.Pool
+	TX              pgx.Tx
 	serverTXID      int64
 	serverConnID    int64
 	id              string
 	deferredCommits []func() error
+	aborted         bool
 }
 
 // PgTx returns the underlying SQL transaction object
-func (m *Finalizer) PgTx() *sql.Tx {
+func (m *Finalizer) PgTx() pgx.Tx {
 	return m.TX
 }
 
@@ -81,7 +85,7 @@ func (m *Finalizer) Finalize() error {
 // Commit finishes the transaction
 func (m *Finalizer) Commit() error {
 	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	err := m.TX.QueryRow(m.ctx, "SELECT txid_status($1)", m.serverTXID).Scan(&status)
 	if err != nil {
 		return txmanager.WrapError(err, "Commit() failed to get txid_status()")
 	}
@@ -89,7 +93,7 @@ func (m *Finalizer) Commit() error {
 	if status != "in progress" {
 		return fmt.Errorf("Commit on TX in status '%s'", status)
 	}
-	err = m.TX.Commit()
+	err = m.TX.Commit(m.ctx)
 	if err != nil {
 		return txmanager.WrapError(err, "Failed to commit")
 	}
@@ -99,22 +103,17 @@ func (m *Finalizer) Commit() error {
 
 // Abort rolls back the transaction
 func (m *Finalizer) Abort() {
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	m.Trace("transaction status at Abort() '%s'", status)
-	if status == "in progress" {
-		err = m.TX.Rollback()
-		if err != nil {
-			ctxErr := m.ctx.Err()
-			if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
-				// If the context was cancelled for any
-				// reason, the transaction is already
-				// rolled back by the driver
-				return
-			}
-			m.panicf("Failed to roll back", err)
-		}
+	if m.aborted {
+		m.Trace("Abort() called, but already aborted")
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := m.TX.Rollback(ctx)
+	if err != nil {
+		m.Trace("During TX.Rollback(): %+v", err)
+	}
+	m.aborted = true
 }
 
 func (m *Finalizer) finalizerError(err error) *txmanager.Error {
@@ -127,26 +126,23 @@ func (m *Finalizer) finalizerError(err error) *txmanager.Error {
 	)
 }
 
+const printformat = "%s: TX: %s PGTXID: %d PGPID: %d message: %s"
+
 func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
-	log.Printf("panicf called from %s:%d", f, l)
-	pqerr, ok := err.(*pq.Error)
-	if ok {
-		m.Trace("pq.Error: %+v", pqerr)
-	} else {
-		m.Trace("%T: %+v", err, err)
+	m.printf("PANIC", fmt.Sprintf("called from %s:%d", f, l))
+	m.Trace("%T: %+v", err, err)
+	ctxErr := m.ctx.Err()
+	if ctxErr != nil {
+		m.printf("PANIC", fmt.Sprintf("Context error: %s", ctxErr.Error()))
 	}
 	message := fmt.Sprintf(msg, args...)
 	if err != nil {
 		message = fmt.Sprintf("%s Error: %s", message, err.Error())
 	}
-	ctxErr := m.ctx.Err()
-	if ctxErr != nil {
-		panic(ctxErr)
-	}
 	log.Panicf(
-		"PANIC: TX: %s PGTXID: %d PGPID: %d message: %s",
-		m.id, m.serverTXID, m.serverConnID, message,
+		printformat,
+		"PANIC", m.id, m.serverTXID, m.serverConnID, message,
 	)
 }
 
@@ -157,8 +153,14 @@ func (m *Finalizer) Trace(format string, args ...interface{}) {
 		return
 	}
 	message := fmt.Sprintf(format, args...)
+	m.printf("trace", message)
+}
+
+// printf prints to the default logger with a prefix
+// that includes helpful data for tracing
+func (m *Finalizer) printf(prefix, message string) {
 	log.Printf(
-		"trace: TX: %s PGTXID: %d PGPID: %d message: %s",
-		m.id, m.serverTXID, m.serverConnID, message,
+		printformat,
+		prefix, m.id, m.serverTXID, m.serverConnID, message,
 	)
 }

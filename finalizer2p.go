@@ -2,32 +2,34 @@ package txmpg
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"runtime"
+	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/williammoran/txmanager"
 )
 
 // MakeFinalizer2P is a constructor for a Postgres
 // transaction driver that uses 2-phase commit
 func MakeFinalizer2P(
-	ctx context.Context, name string, cPool *sql.DB,
+	ctx context.Context, name string, cPool *pgxpool.Pool,
 ) *Finalizer2P {
-	tx, err := cPool.BeginTx(ctx, nil)
+	tx, err := cPool.Begin(ctx)
 	if err != nil {
 		panic(err)
 	}
 	var id int64
-	err = tx.QueryRowContext(ctx, "SELECT txid_current()").Scan(&id)
+	err = tx.QueryRow(ctx, "SELECT txid_current()").Scan(&id)
 	if err != nil {
 		panic(err)
 	}
 	var pid int64
-	err = tx.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&pid)
+	err = tx.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
 	if err != nil {
 		panic(err)
 	}
@@ -48,16 +50,18 @@ type Finalizer2P struct {
 	ctx             context.Context
 	TraceFlag       bool
 	name            string
-	pool            *sql.DB
-	TX              *sql.Tx
+	pool            *pgxpool.Pool
+	TX              pgx.Tx
 	serverTXID      int64
 	serverConnID    int64
 	id              string
 	deferredCommits []func() error
+	comitted        bool
+	aborted         bool
 }
 
-// PgTx returns the underlying SQL transaction object
-func (m *Finalizer2P) PgTx() *sql.Tx {
+// PgTx returns the underlying transaction object
+func (m *Finalizer2P) PgTx() pgx.Tx {
 	return m.TX
 }
 
@@ -79,18 +83,20 @@ func (m *Finalizer2P) Finalize() error {
 		}
 	}
 	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	m.Trace("transaction status at Finalize() '%s'", status)
+	err := m.pool.QueryRow(m.ctx, "SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	if err != nil {
+		m.panicf("Getting txid_status()", err)
+	}
+	m.Trace("transaction status before PREPARE '%s'", status)
 	if status != "in progress" {
 		ctxErr := m.ctx.Err()
 		if ctxErr == context.DeadlineExceeded || ctxErr == context.Canceled {
 			return ctxErr
 		}
-		m.panicf("Finalize() not in active transaction", nil)
+		return errors.New("Finalize() not in active transaction")
 	}
 	m.id = uuid.New().String()
-	m.Trace("Create Finalizer2P ID")
-	_, err = m.TX.Exec(fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
+	_, err = m.TX.Exec(m.ctx, fmt.Sprintf("PREPARE TRANSACTION '%s'", m.id))
 	if err != nil {
 		defer func() { m.id = "" }()
 		return m.finalizerError(
@@ -98,94 +104,91 @@ func (m *Finalizer2P) Finalize() error {
 		)
 	}
 	m.Trace("Transaction prepared")
+	err = m.TX.Commit(m.ctx)
+	if err != nil {
+		m.panicf("Commit()", err)
+	}
+	err = m.pool.QueryRow(m.ctx, "SELECT txid_status($1)", m.serverTXID).Scan(&status)
+	if err != nil {
+		m.panicf("Getting txid_status()", err)
+	}
+	m.Trace("transaction status after PREPARE '%s'", status)
 	return nil
 }
 
 // Commit finishes the transaction
 func (m *Finalizer2P) Commit() error {
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	if err != nil {
-		return txmanager.WrapError(err, "Commit() failed to get txid_status()")
+	if m.id == "" {
+		return errors.New("Commit() on transaction that was never finalized")
 	}
-	m.Trace("transaction status at Commit() '%s'", status)
-	if status != "in progress" {
-		return fmt.Errorf("Unexpected tx status '%s'", status)
+	if m.comitted {
+		return errors.New("Commit() on already comitted transation")
 	}
-	err = m.TX.Commit()
-	if err != nil {
-		m.Trace("Commit error: %s", err.Error())
-		ctxErr := m.ctx.Err()
-		if ctxErr != nil {
-			return ctxErr
-		}
-		return txmanager.WrapError(err, "Unexpected transaction error")
-	}
-	_, err = m.pool.Exec(fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
+	_, err := m.pool.Exec(m.ctx, fmt.Sprintf("COMMIT PREPARED '%s'", m.id))
 	if err != nil {
 		m.Trace("COMMIT PREPARED error: %s", err.Error())
-		pqerr, casted := err.(*pq.Error)
-		if casted {
-			m.Trace("COMMIT PREPARED error %+#v", pqerr)
-		}
 		ctxErr := m.ctx.Err()
 		if ctxErr != nil {
 			return ctxErr
 		}
 		return txmanager.WrapError(err, "Failed to commit prepared")
 	}
+	m.comitted = true
 	m.Trace("Transaction committed")
 	return nil
 }
 
 // Abort rolls back the transaction
 func (m *Finalizer2P) Abort() {
-	var status string
-	err := m.TX.QueryRow("SELECT txid_status($1)", m.serverTXID).Scan(&status)
-	m.Trace("transaction status at Abort() '%s'", status)
-	if status == "in progress" {
-		err = m.TX.Rollback()
-		if err != nil {
-			ctxErr := m.ctx.Err()
-			// If the context was cancelled for any
-			// reason, the transaction is already
-			// rolled back by the driver
-			if ctxErr != nil {
-				m.panicf("Failed to roll back", err)
-			}
-		}
+	if m.aborted {
+		m.Trace("Abort() on already aborted transaction")
+		return
+	}
+	if m.comitted {
+		m.Trace("Abort() on comitted transaction")
+		return
 	}
 	if m.id == "" {
 		m.Trace("Abort() on transaction that was never finalized")
+		m.aborted = true
 		return
 	}
-	_, err = m.pool.Exec(fmt.Sprintf("ROLLBACK PREPARED '%s'", m.id))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := m.pool.Exec(ctx, fmt.Sprintf("ROLLBACK PREPARED '%s'", m.id))
 	if err != nil {
 		m.panicf("Failed ROLLBACK PREPARED", err)
 	}
+	m.aborted = true
 	m.Trace("ROLLBACK PREPARED")
 }
+
+const msgformat = "%s: CONN: %s TX: %s PGTXID: %d PGPID: %d message: %s"
 
 func (m *Finalizer2P) finalizerError(err error) *txmanager.Error {
 	return txmanager.WrapError(
 		err,
 		fmt.Sprintf(
-			"TX: %s PGTXID: %d PGPID: %d message: %s",
-			m.id, m.serverTXID, m.serverConnID, err.Error(),
+			msgformat,
+			"Error", m.name, m.id, m.serverTXID, m.serverConnID, err.Error(),
 		),
 	)
 }
 
 func (m *Finalizer2P) panicf(msg string, err error, args ...interface{}) {
 	_, f, l, _ := runtime.Caller(1)
-	log.Printf("panicf called from %s:%d", f, l)
+	log.Printf(
+		msgformat,
+		"PANIC", m.name, m.id, m.serverTXID, m.serverConnID,
+		fmt.Sprintf("called from %s:%d", f, l),
+	)
 	message := fmt.Sprintf(msg, args...)
 	if err != nil {
 		message = fmt.Sprintf("%s Error: %s", message, err.Error())
 	}
 	log.Panicf(
-		"TX: %s PGTXID: %d PGPID: %d message: %s",
-		m.id, m.serverTXID, m.serverConnID, message,
+		msgformat,
+		"PANIC", m.name, m.id, m.serverTXID, m.serverConnID, message,
 	)
 }
 
@@ -197,7 +200,7 @@ func (m *Finalizer2P) Trace(format string, args ...interface{}) {
 	}
 	message := fmt.Sprintf(format, args...)
 	log.Printf(
-		"TX: %s PGTXID: %d PGPID: %d message: %s",
-		m.id, m.serverTXID, m.serverConnID, message,
+		msgformat,
+		"trace", m.name, m.id, m.serverTXID, m.serverConnID, message,
 	)
 }

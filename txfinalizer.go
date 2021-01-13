@@ -1,8 +1,7 @@
 package txmpg
 
 import (
-	"database/sql"
-
+	"github.com/jackc/pgx/v4"
 	"github.com/williammoran/txmanager"
 )
 
@@ -11,6 +10,6 @@ import (
 // interchangeably
 type TxFinalizer interface {
 	txmanager.TxFinalizer
-	PgTx() *sql.Tx
+	PgTx() pgx.Tx
 	Trace(format string, args ...interface{})
 }
