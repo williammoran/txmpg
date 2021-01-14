@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/williammoran/txmanager/v2"
-	"github.com/williammoran/txmpg"
+	"github.com/williammoran/txmpg/v2"
 )
 
 // This example simulates bank transfers between two
