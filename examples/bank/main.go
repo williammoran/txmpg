@@ -169,14 +169,15 @@ func transfer(
 	var f0, f1 txmpg.TxFinalizer
 	if manager == 1 {
 		f0 = txmpg.NewFinalizer(ctx, "bank0", c0)
-		f0.(*txmpg.Finalizer).TraceFlag = debug
 		f1 = txmpg.NewFinalizer(ctx, "bank1", c1)
-		f1.(*txmpg.Finalizer).TraceFlag = debug
 	} else {
 		f0 = txmpg.NewFinalizer2P(ctx, "bank0", c0)
-		f0.(*txmpg.Finalizer2P).TraceFlag = debug
 		f1 = txmpg.NewFinalizer2P(ctx, "bank1", c1)
-		f1.(*txmpg.Finalizer2P).TraceFlag = debug
+	}
+	if debug {
+		l := log.New(os.Stderr, "TX: ", log.LstdFlags)
+		f0.SetLogger(l)
+		f1.SetLogger(l)
 	}
 	txm.Add("bank0", f0)
 	txm.Add("bank1", f1)

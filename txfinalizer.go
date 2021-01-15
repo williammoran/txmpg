@@ -2,6 +2,7 @@ package txmpg
 
 import (
 	"database/sql"
+	"log"
 
 	"github.com/williammoran/txmanager/v2"
 )
@@ -12,5 +13,6 @@ import (
 type TxFinalizer interface {
 	txmanager.TxFinalizer
 	PgTx() *sql.Tx
+	SetLogger(*log.Logger)
 	Trace(format string, args ...interface{})
 }

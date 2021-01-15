@@ -56,7 +56,7 @@ func NewFinalizer2P(
 // prepared transactions before using this finalizer
 type Finalizer2P struct {
 	ctx             context.Context
-	TraceFlag       bool
+	logger          *log.Logger
 	name            string
 	pool            *sql.DB
 	TX              *sql.Tx
@@ -64,6 +64,12 @@ type Finalizer2P struct {
 	serverConnID    int64
 	id              string
 	deferredCommits []func() error
+}
+
+// SetLogger sets the logger that all status messages will
+// be delivered to
+func (m *Finalizer2P) SetLogger(l *log.Logger) {
+	m.logger = l
 }
 
 // PgTx returns the underlying SQL transaction object
@@ -193,11 +199,11 @@ func (m *Finalizer2P) panicf(msg string, err error, args ...interface{}) {
 // Trace logs a message with details about the IDs
 // associated with the finalizer
 func (m *Finalizer2P) Trace(format string, args ...interface{}) {
-	if !m.TraceFlag {
+	if m.logger == nil {
 		return
 	}
 	message := fmt.Sprintf(format, args...)
-	log.Printf(
+	m.logger.Printf(
 		"TX: %s PGTXID: %d PGPID: %d message: %s",
 		m.id, m.serverTXID, m.serverConnID, message,
 	)

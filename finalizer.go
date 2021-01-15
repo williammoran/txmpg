@@ -43,13 +43,19 @@ func NewFinalizer(
 // Finalizer manages transactions on a PostgreSQL server
 type Finalizer struct {
 	ctx             context.Context
-	TraceFlag       bool
+	logger          *log.Logger
 	name            string
 	TX              *sql.Tx
 	serverTXID      int64
 	serverConnID    int64
 	id              string
 	deferredCommits []func() error
+}
+
+// SetLogger sets the logger that all status messages will
+// be delivered to
+func (m *Finalizer) SetLogger(l *log.Logger) {
+	m.logger = l
 }
 
 // PgTx returns the underlying SQL transaction object
@@ -159,11 +165,11 @@ func (m *Finalizer) panicf(msg string, err error, args ...interface{}) {
 // Trace logs a message with details about the IDs
 // associated with the finalizer
 func (m *Finalizer) Trace(format string, args ...interface{}) {
-	if !m.TraceFlag {
+	if m.logger == nil {
 		return
 	}
 	message := fmt.Sprintf(format, args...)
-	log.Printf(
+	m.logger.Printf(
 		"trace: TX: %s PGTXID: %d PGPID: %d message: %s",
 		m.id, m.serverTXID, m.serverConnID, message,
 	)
